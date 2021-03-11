@@ -1,0 +1,476 @@
+<!doctype html>
+<html>
+<head>
+<meta charset='UTF-8'>
+<title>FTO simulator (weirdletters edition)</title>
+<style>
+html {background-color: black; color: white;}
+body
+{
+font-family: sans-serif;
+font-size: 32px;
+}
+#display_container
+{
+background-color: black;
+width: 15em;
+height: 15em;
+position: relative;
+}
+svg
+{
+background-color: black;
+width: 100%;
+height: 100%;
+position: absolute;
+top: 0;
+left: 0;
+/*cursor: not-allowed;*/
+}
+#input_capture polygon
+{
+cursor: pointer;
+}
+</style>
+</head>
+<body>
+<div id='display_container'>
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='-2 -2 4 4' tabindex='0'>
+<g id='display'></g>
+<rect width='4' height='4' x='-2' y='-2' fill='#333333' opacity='0' id='cover'></rect>
+<g id='input_capture' opacity='0'></g>
+</svg>
+</div>
+<div>Time: <span id='timer'>-</span><br>Moves: <span id='move_count'>-</span> (ETM)<br>ETPS: <span id='tps'>-</span></div>
+<details>
+<summary>Controls</summary>
+<p>Press space to scramble or to start inspection.</p>
+<p>Mouse:<br>primary click = clockwise<br>secondary click = anticlockwise<br>middle click = rotate whole puzzle</p>
+<p>Keyboard: [insert keyboard table here]</p>
+</details>
+<script src='ftosim.js'></script>
+<script>
+'use strict';
+
+let sim_size = 2;
+let simulator = new FTOSim(sim_size);
+let svg_el = document.querySelector('svg');
+let display_el = document.querySelector('svg #display');
+simulator.attach(display_el);
+//simulator.facelets[0].__verbose = true;
+simulator.update_and_draw(performance.now(), true); // force redraw on first run
+
+document.body.onload = document.body.onfocus = event => {svg_el.focus();};
+svg_el.addEventListener('keydown', keydown);
+
+let input_capture_el = document.querySelector('svg #input_capture');
+let input_capture = new FTOSim(1);
+input_capture.attach(input_capture_el);
+input_capture.update_and_draw(0, true);
+for (let f = 0; f < 8; f++)
+{
+	let face = ['U', 'F', 'BR', 'BL', 'L', 'R', 'D', 'B'][f];
+	let handler = event => {
+		//console.log(event.button);
+		if (timer_state === TIMER_STATES.WAITING) {return;}
+		// TODO: allow making wide moves (and maybe slice moves) somehow
+		switch (event.button)
+		{
+			case 0: // primary (= left click on right-handed mouse)
+				//simulator.apply_block_move(face, 0, 1, 1);
+				do_move(face);
+				event.preventDefault();
+				break;
+			case 2: // secondary (= right click on right-handed mouse)
+				//simulator.apply_block_move(face, 0, 1, -1);
+				do_move(face + "'");
+				event.preventDefault();
+				break;
+			case 1: // middle click
+				//simulator.apply_block_move(face, 0, simulator.size, 1);
+				do_move(face + 'o');
+				event.preventDefault();
+				break;
+			default: // anything else
+				return;
+		}
+	};
+	input_capture.facelets[f].g_el.addEventListener('mousedown', handler);
+}
+input_capture_el.addEventListener('contextmenu', event => event.preventDefault());
+input_capture_el.addEventListener('mousedown', event => svg_el.focus());
+
+let cover_el = document.querySelector('svg #cover');
+
+let timer_el = document.querySelector('#timer');
+let tps_el = document.querySelector('#tps');
+let move_count_el = document.querySelector('#move_count');
+
+function update_loop(timestamp, repeat=true)
+{
+	//console.log(timestamp);
+	simulator.update_and_draw(timestamp);
+
+	switch (timer_state)
+	{
+		case TIMER_STATES.INACTIVE:
+			// don't touch the timer
+			cover_el.setAttribute('opacity', '0');
+			break;
+		case TIMER_STATES.WAITING:
+			timer_el.textContent = '-';
+			tps_el.textContent = '-';
+			move_count_el.textContent = '-';
+			cover_el.setAttribute('opacity', '1');
+			break;
+		case TIMER_STATES.INSPECTING:
+		{
+			cover_el.setAttribute('opacity', '0');
+			let time = performance.now();
+			timer_value = time - timer_start;
+			if (inspection_type === INSPECTION_TYPES.NONE)
+			{
+				console.log("inspection_type = none and timer_state = inspecting; this shouldn't happen");
+				break;
+			}
+			else if (inspection_type === INSPECTION_TYPES.WCA)
+			{
+				if (timer_value > 15000)
+				{
+					// automatically start timing if 15 seconds of inspection time
+					// are used up; this is a necessary deviation from "true" WCA
+					// inspection if we want to automatically start the timer by
+					// making moves.
+					timer_start += 15000;
+					timer_value = time - timer_start;
+					timer_state = TIMER_STATES.SOLVING;
+					// *don't* break here; we fall through in the switch block
+					// to TIMER_STATES.SOLVING
+				}
+				else
+				{
+					timer_el.textContent = '(insp) ' + format_time_wca_inspection(timer_value);
+					break;
+				}
+			}
+			else if (inspection_type === INSPECTION_TYPES.UNLIMITED)
+			{
+				timer_el.textContent = '(insp) ' + format_time(timer_value);
+				break;
+			}
+		}
+		case TIMER_STATES.SOLVING:
+		{
+			cover_el.setAttribute('opacity', '0');
+			let time = performance.now();
+			timer_value = time - timer_start;
+			timer_el.textContent = format_time(timer_value);
+			tps_el.textContent = (etm_turns * 1000 / timer_value).toFixed(3);
+			move_count_el.textContent = etm_turns;
+			break;
+		}
+	}
+
+	if (repeat) {window.requestAnimationFrame(update_loop);}
+}
+
+// taken from Aedan's FTOSIM v1.1
+// note: while FTOSim.apply_move_sequence_from_string lets you use spaces and tabs
+// (and any number of them), here you should only use a single space to delimit the
+// moves; no tabs, no newlines, no comments.
+let keybinds = {
+"KeyI": "R",
+"KeyK": "R'",
+"KeyD": "L",
+"KeyE": "L'",
+"KeyJ": "U",
+"KeyF": "U'",
+"KeyH": "F",
+"KeyG": "F'",
+"KeyS": "D",
+"KeyL": "D'",
+"KeyW": "B",
+"KeyO": "B'",
+"Digit8": "BR",
+"Comma": "BR'",
+"KeyC": "BL",
+"Digit3": "BL'",
+"KeyU": "Rw",
+"KeyM": "Rw'",
+"KeyR": "Lw'",
+"KeyV": "Lw",
+"Shift KeyI": "F",
+"Shift KeyK": "F'",
+"Shift KeyJ": "U",
+"Shift KeyF": "U'",
+"Shift KeyS": "D",
+"Shift KeyL": "D'",
+"KeyY": "Ro",
+"KeyN": "Ro'",
+"KeyT": "Lo'",
+"KeyB": "Lo",
+"Semicolon": "Uo",
+"KeyA": "Uo'",
+"KeyP": "T",
+"KeyQ": "T'",
+"Shift KeyM": "Uo T'",
+"Shift KeyU": "T Uo'",
+"Shift KeyV": "Uo' T",
+"Shift KeyR": "T' Uo",
+"Backquote": "Lo'",
+"Shift KeyA": "Uo'",
+"Shift KeyP": "T",
+"Shift KeyQ": "T'",
+"Digit0": "[RESET]",
+"Space": "[SPACE]",
+};
+
+function keydown(event)
+{
+	console.log(`keydown: code=${event.code} key=${event.key}`);
+	if (event.ctrlKey || event.altKey) {return;}
+	let code = (event.shiftKey ? 'Shift ' : '') + event.code;
+	if (typeof keybinds[code] === 'string')
+	{
+		event.preventDefault();
+		if (keybinds[code] === '[RESET]')
+		{
+			if (!confirm('really reset?')) {return;}
+			console.log('resetting');
+			sim_reset();
+			return;
+		}
+		if (keybinds[code] === '[SPACE]')
+		{
+			console.log('all-purpose key');
+			switch (timer_state)
+			{
+				case TIMER_STATES.INACTIVE:
+					sim_scramble();
+					timer_state = TIMER_STATES.WAITING;
+					break;
+				case TIMER_STATES.WAITING:
+					if (inspection_type === INSPECTION_TYPES.NONE)
+					{
+						timer_state = TIMER_STATES.SOLVING;
+					}
+					else
+					{
+						timer_state = TIMER_STATES.INSPECTING;
+					}
+					timer_start = performance.now();
+					timer_value = 0;
+					update_loop(timer_start, false);
+					break;
+			}
+			return;
+		}
+		if (timer_state === TIMER_STATES.WAITING)
+		{
+			console.log('cannot apply moves while waiting');
+			return;
+		}
+		let move = keybinds[code];
+		do_move(move);
+		return;
+	}
+	else if (event.key === "'" || event.key === '/')
+	{
+		// these are Firefox's keybinds for quick find
+		// note that these depend on keyboard layout
+		event.preventDefault();
+		return;
+	}
+}
+
+function do_move(move, time=performance.now())
+{
+	simulator.apply_move_sequence_from_string(move, time);
+	switch (timer_state)
+	{
+		case TIMER_STATES.INSPECTING:
+			if (move.split(' ').every(s => s.includes('T') || s.includes('v') || s.includes('o')))
+			{
+				// this is a rotation (or a bunch of rotations)
+				move_history.push([move, 0]);
+				break;
+			}
+			else
+			{
+				// this contains actual turns
+				etm_turns = 0;
+				timer_start = time;
+				timer_state = TIMER_STATES.SOLVING;
+				// don't break; fall through
+			}
+		case TIMER_STATES.SOLVING:
+			timer_value = time - timer_start;
+			move_history.push([move, timer_value]);
+			etm_turns++;
+			if (simulator.check_solved())
+			{
+				update_loop(time, false);
+				results.push(new Result(timer_value, false, current_scramble, move_history));
+				timer_state = TIMER_STATES.INACTIVE;
+			}
+			break;
+		case TIMER_STATES.INACTIVE:
+			move_history.push([move, timer_value]);
+			break;
+	}
+}
+
+function sim_reset(draw=true)
+{
+	if (timer_state === TIMER_STATES.INSPECTING)
+	{
+		results.push(new Result(0, true, current_scramble, []));
+		timer_state = TIMER_STATES.INACTIVE;
+	}
+	else if (timer_state === TIMER_STATES.SOLVING)
+	{
+		let time = performance.now();
+		timer_value = time - timer_start;
+		results.push(new Result(timer_value, true, current_scramble, move_history));
+		timer_state = TIMER_STATES.INACTIVE;
+	}
+	move_history = [];
+	etm_turns = 0;
+	simulator.detach();
+	simulator = new FTOSim(sim_size);
+	simulator.attach(display_el);
+	if (draw) {simulator.update_and_draw(performance.now(), true);}
+}
+
+function sim_scramble(random_orientation=true)
+{
+	sim_reset(false);
+	const size = simulator.size;
+	const f = Math.floor((size-1)/2), b = Math.ceil((size-1)/2);
+	const scramble_length = 20*(size-1);
+	let last = Math.floor(Math.random()*4);
+	let faces = ['U', 'L', 'F', 'R', 'D', 'BR', 'B', 'BL'];
+	let l = [];
+	if (size >= 2)
+	{
+		for (let i = 0; i < scramble_length; i++)
+		{
+			let axis = (last + 1 + Math.floor(Math.random()*3)) % 4;
+			let added = 0;
+			while (added === 0)
+			{
+				for (let j = 1, face = faces[axis]; j <= f; j++)
+				{
+					let a = Math.floor(Math.random()*3)-1;
+					if (a === 0) {continue;}
+					added++;
+					let base = j + face.toLowerCase();
+					if (j === 1) {base = face;}
+					else if (j === 2) {base = face.toLowerCase();}
+					l.push(base + (a === 1 ? '' : "'"));
+				}
+				for (let j = 1, face = faces[axis+4]; j <= b; j++)
+				{
+					let a = Math.floor(Math.random()*3)-1;
+					if (a === 0) {continue;}
+					added++;
+					let base = j + face.toLowerCase();
+					if (j === 1) {base = face;}
+					else if (j === 2) {base = face.toLowerCase();}
+					l.push(base + (a === 1 ? '' : "'"));
+				}
+			}
+			last = axis;
+		}
+	}
+	if (random_orientation)
+	{
+		let a = Math.floor(Math.random()*4);
+		if (a !== 0)
+		{
+			let suffix = [null, '', '2', "'"][a];
+			l.push('T' + suffix);
+		}
+	}
+	current_scramble = l.join(' ');
+	simulator.apply_move_sequence_from_string(current_scramble + '// 0.0', 0);
+	simulator.update_and_draw(performance.now(), true);
+	if (inspection_type === INSPECTION_TYPES.UNLIMITED)
+	{
+		timer_state = TIMER_STATES.INSPECTING;
+	}
+	else
+	{
+		timer_state = TIMER_STATES.WAITING;
+	}
+	timer_start = performance.now();
+	timer_value = 0;
+}
+
+const TIMER_STATES = ['INACTIVE', 'WAITING', 'INSPECTING', 'SOLVING'].reduce((o, s) => {o[s] = s; return o;}, {});
+/*
+INACTIVE:
+	untimed mode
+	timer not updated
+WAITING:
+	scrambled and covered (exclusive with "UNLIMITED" inspection)
+	timer not updated
+INSPECTING:
+	scrambled and being inspected (exclusive with "NONE" inspection)
+	timer shows inspection
+	making any non-rotation move causes transition to SOLVING
+	if using "WCA" inspection, transition to SOLVING after 15 seconds
+SOLVING:
+	being solved
+	timer shows solving time
+	finishing the solve causes transition to INACTIVE
+*/
+const INSPECTION_TYPES = ['NONE', 'WCA', 'UNLIMITED'].reduce((o, s) => {o[s] = s; return o;}, {});
+
+let timer_state = TIMER_STATES.INACTIVE;
+// these values are in milliseconds (not necessarily integer)
+let timer_start = 0;
+let timer_value = 0;
+
+let inspection_type = INSPECTION_TYPES.WCA;
+
+function format_time(ms)
+{
+	ms = Math.round(ms);
+	let min = Math.floor(ms / 60000);
+	let sec = (ms % 60000) / 1000;
+	if (min > 0)
+	{
+		return min + ':' + (sec + 100).toFixed(3).substring(1);
+	}
+	return sec.toFixed(3);
+}
+
+function format_time_wca_inspection(ms)
+{
+	if (ms < 12000) {return '' + Math.ceil(ms/1000);}
+	if (ms < 14000) {return '' + (Math.ceil(ms/100)/10).toFixed(1);}
+	return '' + (Math.ceil(ms/10)/100).toFixed(2);
+}
+
+class Result
+{
+	constructor(time, is_dnf, scramble, reconstruction, datetime=Date.now())
+	{
+		this.time = time;
+		this.is_dnf = is_dnf;
+		this.scramble = scramble;
+		this.reconstruction = reconstruction.slice();
+		this.datetime = datetime;
+	}
+}
+
+let current_scramble = '';
+let move_history = [];
+let etm_turns = 0;
+let results = [];
+
+window.requestAnimationFrame(update_loop);
+</script>
+</body>
+</html>
