@@ -1,5 +1,5 @@
 /* ftosim.js - A face-turning octahedron twisty puzzle simulator
-version 0.1 (2021-03-12)
+version 0.1.1 (2021-03-12)
 
 Copyright (c) 2021 torchlight
 
@@ -358,9 +358,10 @@ class Animation
 
 	transform(vector, time)
 	{
-		let t = (time - this.start) / (this.end - this.start);
-		if (time < this.start) {t = 0;}
-		else if (time > this.end) {t = 1;}
+		let t;
+		if (time >= this.end) {t = 1;}
+		else if (time <= this.start) {t = 0;}
+		else {t = (time - this.start) / (this.end - this.start);}
 		t = ease(t);
 		let axis = this.axis;
 		let angle = this.angle * t;
